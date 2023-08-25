@@ -59,7 +59,6 @@ class DETR(nn.Module):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, pos = self.backbone(samples)
-
         src, mask = features[-1].decompose()
         assert mask is not None
         hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
@@ -118,7 +117,7 @@ class SetCriterion(nn.Module):
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)#######################
         losses = {'loss_ce': loss_ce}
 
         if log:
@@ -210,7 +209,8 @@ class SetCriterion(nn.Module):
             'masks': self.loss_masks
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
+        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs) 
+    
 
     def forward(self, outputs, targets):
         """ This performs the loss computation.
@@ -222,8 +222,7 @@ class SetCriterion(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)
-
+        indices = self.matcher(outputs_without_aux, targets) 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
@@ -234,7 +233,7 @@ class SetCriterion(nn.Module):
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes)) ############################################# get loss worng
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
@@ -310,7 +309,16 @@ def build(args):
     # you should pass `num_classes` to be 2 (max_obj_id + 1).
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
-    num_classes = 20 if args.dataset_file != 'coco' else 91
+
+
+    #####################################################################
+    
+    num_classes = 20 if args.dataset_file != 'coco' else 254
+    # num_classes = 20 if args.dataset_file != 'coco' else 91
+
+    #####################################################################
+
+
     if args.dataset_file == "coco_panoptic":
         # for panoptic, we just add a num_classes that is large enough to hold
         # max_obj_id + 1, but the exact value doesn't really matter

@@ -15,15 +15,20 @@ import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+########################
+from datasets_ood.data_loader import get_mix_loader
+from config.config import config
+import matplotlib.pyplot as plt
+from skimage.measure import regionprops
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
-    parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--batch_size', default=4, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
-    parser.add_argument('--epochs', default=300, type=int)
+    parser.add_argument('--epochs', default=200, type=int) #original 300
     parser.add_argument('--lr_drop', default=200, type=int)
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
@@ -52,8 +57,10 @@ def get_args_parser():
                         help="Dropout applied in the transformer")
     parser.add_argument('--nheads', default=8, type=int,
                         help="Number of attention heads inside the transformer's attentions")
-    parser.add_argument('--num_queries', default=100, type=int,
+    parser.add_argument('--num_queries', default=1, type=int,
                         help="Number of query slots")
+    # parser.add_argument('--num_queries', default=100, type=int,
+    #                     help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
 
     # * Segmentation
@@ -79,8 +86,9 @@ def get_args_parser():
                         help="Relative classification weight of the no-object class")
 
     # dataset parameters
+
     parser.add_argument('--dataset_file', default='coco')
-    parser.add_argument('--coco_path', type=str)
+    parser.add_argument('--coco_path', default='/people/cs/w/wxz220013/Dataset/COCO', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
@@ -99,6 +107,10 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # OOD parameters
+    parser.add_argument('--prob', default=1., type=float, help="sample fetch-prob for OE")
+    parser.add_argument('--gpus', default=1, type=int, help="gpus in use")
     return parser
 
 
@@ -141,7 +153,6 @@ def main(args):
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
-
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
@@ -152,10 +163,32 @@ def main(args):
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
 
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,    #for each sample, in loader, the first element is nested tensor
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers) #Second element is a tuple contain information.
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    #########
+    train_loader, train_sampler, val_loader= get_mix_loader(gpu=args.gpus, config=config, proba_factor=args.prob)
+    ##################################
+
+    # header = 'Epoch: [{}]'.format(3)
+    # print_freq = 10
+    # metric_logger = utils.MetricLogger(delimiter="  ")
+    # metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    # metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
+    # for city_imgs, city_targets, city_mix_imgs, city_mix_targets, ood_imgs, ood_targets in metric_logger.log_every(train_loader, print_freq, header):
+    #     print(ood_targets[0].shape)
+    #     print(ood_targets.tensors.shape,ood_targets.mask.shape)
+    #     for target in ood_targets.numpy():
+    #         regions = regionprops(target)
+    #         boxes = []
+    #         for props in regions:
+    #             minr, minc, maxr, maxc = props.bbox
+    #             if maxr - minr == target.shape[0] and maxc - minc == target.shape[1]:
+    #                 continue
+    #             boxes.append([minc/target.shape[0],minr/target.shape[1],maxc/target.shape[0],maxr/target.shape[1]])
+    #     exit()
+    ##################################
 
     if args.dataset_file == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
@@ -182,8 +215,12 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
 
     if args.eval:
+        #####################
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
+                                              val_loader, base_ds, device, args.output_dir)
+        #####################
+        # test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
+        #                                       data_loader_val, base_ds, device, args.output_dir)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
@@ -193,9 +230,14 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
+        #####################
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
+            model, criterion, train_loader, optimizer, device, epoch,
             args.clip_max_norm)
+        #####################
+        # train_stats = train_one_epoch(
+        #     model, criterion, data_loader_train, optimizer, device, epoch,
+        #     args.clip_max_norm)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -212,28 +254,31 @@ def main(args):
                 }, checkpoint_path)
 
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            # model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            ############
+            model, criterion, postprocessors, val_loader, base_ds, device, args.output_dir
+            ############
         )
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+        # log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+        #              **{f'test_{k}': v for k, v in test_stats.items()},
+        #              'epoch': epoch,
+        #              'n_parameters': n_parameters}
 
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+        # if args.output_dir and utils.is_main_process():
+        #     with (output_dir / "log.txt").open("a") as f:
+        #         f.write(json.dumps(log_stats) + "\n")
 
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+            # # for evaluation logs
+            # if coco_evaluator is not None:
+            #     (output_dir / 'eval').mkdir(exist_ok=True)
+            #     if "bbox" in coco_evaluator.coco_eval:
+            #         filenames = ['latest.pth']
+            #         if epoch % 50 == 0:
+            #             filenames.append(f'{epoch:03}.pth')
+            #         for name in filenames:
+            #             torch.save(coco_evaluator.coco_eval["bbox"].eval,
+            #                        output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

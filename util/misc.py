@@ -16,6 +16,7 @@ from typing import Optional, List
 import torch
 import torch.distributed as dist
 from torch import Tensor
+from skimage.measure import regionprops
 
 # needed due to empty tensor bug in pytorch and torchvision 0.5
 import torchvision
@@ -67,6 +68,7 @@ class SmoothedValue(object):
 
     @property
     def global_avg(self):
+        print(self.total, self.count)
         return self.total / self.count
 
     @property
@@ -268,6 +270,28 @@ def get_sha():
 
 def collate_fn(batch):
     batch = list(zip(*batch))
+    ################
+    ood_targets = batch[5]       #city_imgs, city_targets, city_mix_imgs, city_mix_targets, ood_imgs, ood_targets
+    ood_imgs = batch[4]
+    targets=[]
+    if not hasattr(collate_fn, '_call_count'):
+            collate_fn._call_count=0
+    for target in ood_targets:
+        collate_fn._call_count += 1
+        #print(torch.unique(target,return_counts=True))
+        boxes = []
+        target = target.numpy()
+        regions = regionprops(target)
+        for props in regions:
+            minr, minc, maxr, maxc = props.bbox
+            if maxr - minr == target.shape[0] and maxc - minc == target.shape[1]:
+                continue
+            boxes.append([minc/target.shape[0],minr/target.shape[1],maxc/target.shape[0],maxr/target.shape[1]])
+        labels = torch.ones(len(boxes), dtype=torch.int64)*254
+        target= {'boxes':torch.tensor(boxes), 'labels':labels ,'orig_size':torch.tensor([target.shape[0],target.shape[1]]), 'size':torch.tensor([target.shape[0],target.shape[1]]),'image_id':torch.tensor([collate_fn._call_count])  }
+        targets.append(target)
+    batch=[ood_imgs,targets]
+    ##############
     batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)
 
